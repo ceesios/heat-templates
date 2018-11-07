@@ -1,0 +1,504 @@
+# Heat template to Create 2 pfsense instances that sync the configuration.
+# Network design based on best practices in the pfsense book https://www.netgate.com/docs/pfsense/book/highavailability/example-redundant-configuration.html
+# Juniper Open Contrail is now called Tungstun Fabric.
+# Service chaining is explained on https://www.juniper.net/documentation/en_US/contrail3.2/topics/task/configuration/service-chaining-vnc.html
+#
+# Use as: openstack stack create -t pfsense_service_chaining.yml stackname
+# 
+# Author: Cees Moerkerken, http://virtu-on.nl/
+# Copyright (C) 2017 Cees Moerkerken (CloudVPS Heat templates)
+# 
+# This program is distributed in the hope that it will be useful, but 
+# WITHOUT ANY WARRANTY;
+
+heat_template_version: 2016-04-08
+
+description: A service chaining setup with pfsense.
+
+
+################
+## Parameters ##
+################
+
+parameters:
+  key_name:
+    type: string
+    label: SSH key name
+    description: Name or ID of existing SSH key
+    default:
+  image:
+    type: string
+    default: "Ubuntu 18.04 (LTS)"
+#    default: "pfSense 2.4.3"
+    description: "name of the pfSense image"
+  flavor:
+    type: string
+    default: "Standard 1GB"
+  svm_name:
+    type: string
+    default: svm_instance
+
+
+  public_net_name:
+    type: string
+    default: "net-public"
+    description: "This can be net-public, however then you won't be able to use a HA public IP"
+
+  left_private_net_name:
+    type: string
+    default: "net-private-left"
+  left_private_net_prefix:
+    type: string
+    default: 192.168.1.0
+  left_private_net_first_octets:
+    type: string
+    default: 192.168.1
+  left_private_net_prefix_len:
+    type: string
+    default: 24
+
+  right_private_net_name:
+    type: string
+    default: "net-private-right"
+  right_private_net_prefix:
+    type: string
+    default: 192.168.2.0
+  right_private_net_first_octets:
+    type: string
+    default: 192.168.2
+  right_private_net_prefix_len:
+    type: string
+    default: 24
+
+  pool_start:
+    type: string
+    description: last octet of the IP pool_start
+    default: 1
+  pool_end:
+    type: string
+    description: last octet of the IP pool_end
+    default: 254
+
+  gateway:
+    type: string
+    description: last octet of the gateway IP
+    default: 1
+  dns:
+    type: string
+    description: last octet of the local DNS server (usually the .2)
+    default: 2
+  lb1:
+    type: string
+    description: last octet of lb1 IP
+    default: 3
+  lb2:
+    type: string
+    description: last octet of lb2 IP
+    default: 4
+
+  private_net_dns_servers:
+    type: comma_delimited_list
+    default: "8.8.8.8,8.8.4.4"
+
+  # private_net_vhid:
+  #   type: number
+  #   default: 2
+  #   description: "Range 1-9"
+  #   constraints:
+  #     - range: { min: 1, max: 9 }
+
+
+  sync_net_name:
+    type: string
+    default: net-sync-pfsense
+  sync_net_prefix:
+    type: string
+    default: 172.16.1.0
+  sync_net_prefix_len:
+    type: string
+    default: 24
+
+  service_template_name:
+    type: string
+    default: pfsense_service_template
+  
+  pt_name:
+    type: string
+    default: port-tuple1
+  policy_name:
+    type: string
+    default: policy1
+  protocol:
+    type: string
+    default: any
+  direction:
+    type: string
+    default: '<>' # ['>', <>]
+  src_port_start:
+    type: string
+    default: -1
+  src_port_end:
+    type: string
+    default: 65535
+  dst_port_start:
+    type: string
+    default: -1
+  dst_port_end:
+    type: string
+    default: 65535
+  simple_action:
+    type: string
+    default: pass # [deny, pass]
+
+resources:
+################
+## Networking ##
+################
+
+  # private_net:
+  #   type: OS::Neutron::Net
+  #   properties:
+  #     name: { get_param: private_net_name }
+
+  # private_subnet:
+  #   type: OS::Neutron::Subnet
+  #   properties:
+  #     network_id: { get_resource: private_net }
+  #     cidr: { list_join: ['/', [{ get_param: private_net_prefix }, { get_param: private_net_prefix_len }]]}
+  #     dns_nameservers: { get_param: private_net_dns_servers }
+  #     enable_dhcp: True
+  #     host_routes: 
+  #       - nexthop: { list_join: ['.', [{str_split: ['.', { get_param: private_net_prefix }, 0]}, {str_split: ['.', { get_param: private_net_prefix }, 1]}, {str_split: ['.', { get_param: private_net_prefix }, 2]}, { get_param: dns }]]}
+  #         destination: 169.254.169.254/32
+  #       - nexthop: { list_join: ['.', [{str_split: ['.', { get_param: private_net_prefix }, 0]}, {str_split: ['.', { get_param: private_net_prefix }, 1]}, {str_split: ['.', { get_param: private_net_prefix }, 2]}, { get_param: gateway }]]}
+  #         destination: 0.0.0.0/0
+  #     gateway_ip: Null
+  #     allocation_pools:
+  #       - start:  { list_join: ['.', [{str_split: ['.', { get_param: private_net_prefix }, 0]}, {str_split: ['.', { get_param: private_net_prefix }, 1]}, {str_split: ['.', { get_param: private_net_prefix }, 2]}, { get_param: pool_start }]]}
+  #         end: { list_join: ['.', [{str_split: ['.', { get_param: private_net_prefix }, 0]}, {str_split: ['.', { get_param: private_net_prefix }, 1]}, {str_split: ['.', { get_param: private_net_prefix }, 2]}, { get_param: pool_end }]]}
+
+  # sync_net:
+  #   type: OS::Neutron::Net
+  #   properties:
+  #     name: {get_param: sync_net_name}
+
+  # sync_subnet:
+  #   type: OS::Neutron::Subnet
+  #   properties:
+  #     network_id: { get_resource: sync_net }
+  #     cidr: { list_join: ['/', [{ get_param: sync_net_prefix }, { get_param: sync_net_prefix_len }]]}
+  #     enable_dhcp: True
+  #     gateway_ip: Null
+
+
+  sync_Ipam:
+    type: OS::ContrailV2::NetworkIpam
+    properties:
+      name:
+        list_join: ['-', [ {get_param: 'OS::stack_name'}, {get_param: sync_net_name}]]
+      display_name:
+        list_join: ['-', [ {get_param: 'OS::stack_name'}, {get_param: sync_net_name}]]
+
+  left_Ipam:
+    type: OS::ContrailV2::NetworkIpam
+    properties:
+      name:
+        list_join: ['-', [ {get_param: 'OS::stack_name'}, {get_param: left_private_net_name}]]
+      display_name:
+        list_join: ['-', [ {get_param: 'OS::stack_name'}, {get_param: left_private_net_name}]]
+
+  right_Ipam:
+    type: OS::ContrailV2::NetworkIpam
+    properties:
+      name:
+        list_join: ['-', [ {get_param: 'OS::stack_name'}, {get_param: right_private_net_name}]]
+      display_name:
+        list_join: ['-', [ {get_param: 'OS::stack_name'}, {get_param: right_private_net_name}]]
+
+  sync_Network:
+    type: OS::ContrailV2::VirtualNetwork
+    depends_on: [ sync_Ipam ]
+    properties:
+      name: { get_param: sync_net_name }
+      network_ipam_refs: [{ get_resource: sync_Ipam }]
+      network_ipam_refs_data:
+      - network_ipam_refs_data_ipam_subnets:
+        - network_ipam_refs_data_ipam_subnets_addr_from_start: true
+          network_ipam_refs_data_ipam_subnets_subnet:
+            network_ipam_refs_data_ipam_subnets_subnet_ip_prefix: { get_param: sync_net_prefix }
+            network_ipam_refs_data_ipam_subnets_subnet_ip_prefix_len: { get_param: sync_net_prefix_len }
+     
+  left_Network:
+    type: OS::ContrailV2::VirtualNetwork
+#    depends_on: [ left_Ipam, NetworkPolicy ]
+    properties:
+      name: { get_param: left_private_net_name }
+      network_ipam_refs: [{ get_resource: left_Ipam }]
+      network_ipam_refs_data:
+      - network_ipam_refs_data_ipam_subnets:
+        - network_ipam_refs_data_ipam_subnets_addr_from_start: true
+          network_ipam_refs_data_ipam_subnets_subnet:
+            network_ipam_refs_data_ipam_subnets_subnet_ip_prefix: { get_param: left_private_net_prefix }
+            network_ipam_refs_data_ipam_subnets_subnet_ip_prefix_len: { get_param: left_private_net_prefix_len }
+      network_policy_refs: [{ list_join: [':', { get_attr: [ NetworkPolicy, fq_name ] } ] }]
+      network_policy_refs_data:
+      - network_policy_refs_data_sequence:
+          network_policy_refs_data_sequence_major: 0
+          network_policy_refs_data_sequence_minor: 0
+        
+  right_Network:
+    type: OS::ContrailV2::VirtualNetwork
+#    depends_on: [ right_Ipam, NetworkPolicy ]
+    properties:
+      name: { get_param: right_private_net_name }
+      network_ipam_refs: [{ get_resource: right_Ipam }]
+      network_ipam_refs_data:
+      - network_ipam_refs_data_ipam_subnets:
+        - network_ipam_refs_data_ipam_subnets_addr_from_start: true
+          network_ipam_refs_data_ipam_subnets_subnet:
+            network_ipam_refs_data_ipam_subnets_subnet_ip_prefix: { get_param: right_private_net_prefix }
+            network_ipam_refs_data_ipam_subnets_subnet_ip_prefix_len: { get_param: right_private_net_prefix_len }
+      network_policy_refs: [{ list_join: [':', { get_attr: [ NetworkPolicy, fq_name ] } ] }]
+      network_policy_refs_data:
+      - network_policy_refs_data_sequence:
+          network_policy_refs_data_sequence_major: 0
+          network_policy_refs_data_sequence_minor: 0
+
+######################
+## Service Template ##
+######################
+
+  ServiceTemplate:
+    type: OS::ContrailV2::ServiceTemplate
+    properties:
+      name:
+        list_join: ['-', [ {get_param: 'OS::stack_name'}, {get_param: service_template_name}]]
+      service_template_properties:
+        service_template_properties_service_mode: in-network
+        service_template_properties_service_type: firewall
+        # service_template_properties_service_virtualization_type: virtual-machine
+        # service_template_properties_image_name: { get_param: image }
+        # service_template_properties_flavor: { get_param: flavor }
+        service_template_properties_ordered_interfaces: true
+        service_template_properties_interface_type:
+          - service_template_properties_interface_type_service_interface_type: management
+            service_template_properties_interface_type_shared_ip: false
+            service_template_properties_interface_type_static_route_enable: false
+          - service_template_properties_interface_type_service_interface_type: left
+            service_template_properties_interface_type_shared_ip: true
+            service_template_properties_interface_type_static_route_enable: false
+          - service_template_properties_interface_type_service_interface_type: right
+            service_template_properties_interface_type_shared_ip: false
+            service_template_properties_interface_type_static_route_enable: false
+      domain: default-domain
+
+  ServiceInstance:
+    type: OS::ContrailV2::ServiceInstance
+    depends_on: [ ServiceTemplate ]
+    properties:
+      name:
+        list_join: ['-', [ {get_param: 'OS::stack_name'}, 'pfsense01']]
+      service_template_refs: [{ get_resource:  template_ServiceTemplate}]
+      service_instance_properties:
+        service_instance_properties_interface_list:
+          - service_instance_properties_interface_list_virtual_network:
+              list_join: [':', { get_attr: [ sync_Network, fq_name ] } ]
+          - service_instance_properties_interface_list_virtual_network:
+              list_join: [':', { get_attr: [ left_Network, fq_name ] } ]
+          - service_instance_properties_interface_list_virtual_network:
+              list_join: [':', { get_attr: [ right_Network, fq_name ] } ]
+      service_template_refs: [{ get_resource: ServiceTemplate }]
+
+
+# ###########
+# ## Ports ##
+# ###########
+
+  template_PortTuple:
+    type: OS::ContrailV2::PortTuple
+    depends_on: [ ServiceInstance ]
+    properties:
+      name: { get_param: pt_name }
+      service_instance: { list_join: [':', { get_attr: [ ServiceInstance, fq_name ] } ] }
+
+  sync_VirtualMachineInterface_1:
+    type: OS::ContrailV2::VirtualMachineInterface
+    depends_on: [ template_PortTuple ]
+    properties:
+      name:  sync_vmi_1
+      virtual_machine_interface_properties:
+        virtual_machine_interface_properties_service_interface_type: management
+      port_tuple_refs: [{ get_resource: template_PortTuple }]
+      virtual_network_refs: [{ list_join: [':', { get_attr: [ sync_Network, fq_name ] } ] }]
+  
+  sync_InstanceIp_1:
+    type: OS::ContrailV2::InstanceIp
+    depends_on: [ sync_VirtualMachineInterface_1, sync_Network ]
+    properties:
+#      config_root: "config-root"
+      virtual_machine_interface_refs: [{ get_resource: sync_VirtualMachineInterface_1 }]
+      virtual_network_refs: [{ list_join: [':', { get_attr: [ sync_Network, fq_name ] } ] }]
+
+  left_VirtualMachineInterface_1:
+    type: OS::ContrailV2::VirtualMachineInterface
+    depends_on: [ template_PortTuple ]
+    properties:
+      name:  left_vmi_1
+      virtual_machine_interface_properties:
+        virtual_machine_interface_properties_service_interface_type: left
+      port_tuple_refs: [{ get_resource: template_PortTuple }]
+      virtual_network_refs: [{ list_join: [':', { get_attr: [ left_Network, fq_name ] } ] }]
+
+  left_InstanceIp_1:
+    type: OS::ContrailV2::InstanceIp
+    depends_on: [ left_VirtualMachineInterface_1, left_Network ]
+    properties:
+#      config_root: "config-root"
+      virtual_machine_interface_refs: [{ get_resource: left_VirtualMachineInterface_1 }]
+      virtual_network_refs: [{ list_join: [':', { get_attr: [ left_Network, fq_name ] } ] }]
+
+  right_VirtualMachineInterface_1:
+    type: OS::ContrailV2::VirtualMachineInterface
+    depends_on: [ template_PortTuple ]
+    properties:
+      name:  right_vmi_1
+      virtual_machine_interface_properties:
+        virtual_machine_interface_properties_service_interface_type: right
+      port_tuple_refs: [{ get_resource: template_PortTuple }]
+      virtual_network_refs: [{ list_join: [':', { get_attr: [ right_Network, fq_name ] } ] }]
+
+  right_InstanceIp_1:
+    type: OS::ContrailV2::InstanceIp
+    depends_on: [ right_VirtualMachineInterface_1, right_Network ]
+    properties:
+#      config_root: "config-root"
+      virtual_machine_interface_refs: [{ get_resource: right_VirtualMachineInterface_1 }]
+      virtual_network_refs: [{ list_join: [':', { get_attr: [ right_Network, fq_name ] } ] }]
+
+  instance:
+    type: OS::Nova::Server
+    depends_on: [ sync_InstanceIp_1, left_InstanceIp_1, right_InstanceIp_1 ]
+    properties:
+      name: {get_param: svm_name }
+      image: { get_param:  image }
+      flavor: { get_param: flavor }
+      key_name: { get_param: key_name }
+      networks:
+        - port: { get_resource: sync_VirtualMachineInterface_1 }
+        - port: { get_resource: left_VirtualMachineInterface_1 }
+        - port: { get_resource: right_VirtualMachineInterface_1 }
+
+
+
+  left_VirtualMachineInterface_2:
+    type: OS::ContrailV2::VirtualMachineInterface
+    properties:
+      name:  left_vmi_2
+      virtual_network_refs: [{ list_join: [':', { get_attr: [ left_Network, fq_name ] } ] }]
+  
+  left_InstanceIp_2:
+    type: OS::ContrailV2::InstanceIp
+    depends_on: [ left_VirtualMachineInterface_2, left_Network ]
+    properties:
+#      config_root: "config-root"
+      virtual_machine_interface_refs: [{ get_resource: left_VirtualMachineInterface_2 }]
+      virtual_network_refs: [{ list_join: [':', { get_attr: [ left_Network, fq_name ] } ] }]
+
+  right_VirtualMachineInterface_2:
+    type: OS::ContrailV2::VirtualMachineInterface
+    properties:
+      name:  right_vmi_2
+      virtual_network_refs: [{ list_join: [':', { get_attr: [ right_Network, fq_name ] } ] }]
+  
+  right_InstanceIp_2:
+    type: OS::ContrailV2::InstanceIp
+    depends_on: [ right_VirtualMachineInterface_2, right_Network ]
+    properties:
+#      config_root: "config-root"
+      virtual_machine_interface_refs: [{ get_resource: right_VirtualMachineInterface_2 }]
+      virtual_network_refs: [{ list_join: [':', { get_attr: [ right_Network, fq_name ] } ] }]
+
+  template_leftVM:
+    type: OS::Nova::Server
+    depends_on: [ left_InstanceIp_2 ]
+    properties:
+      name: left_vmi_2
+      image: { get_param:  image }
+      flavor: { get_param: flavor }
+      key_name: { get_param: key_name }
+      networks:
+        - port: { get_resource: left_VirtualMachineInterface_2 }
+
+  template_rightVM:
+    type: OS::Nova::Server
+    depends_on: [ right_InstanceIp_2 ]
+    properties:
+      name: right_vmi_2
+      image: { get_param:  image }
+      flavor: { get_param: flavor }
+      key_name: { get_param: key_name }
+      networks:
+        - port: { get_resource: right_VirtualMachineInterface_2 }
+
+
+
+  NetworkPolicy:
+    type: OS::ContrailV2::NetworkPolicy
+    properties:
+      name: { get_param: policy_name }
+      network_policy_entries: 
+        network_policy_entries_policy_rule: 
+          - network_policy_entries_policy_rule_protocol: { get_param: protocol }
+            network_policy_entries_policy_rule_direction: { get_param: direction }
+            # network_policy_entries_policy_rule_application: []
+
+            ### Rule source
+            network_policy_entries_policy_rule_src_ports:
+              - network_policy_entries_policy_rule_src_ports_start_port: { get_param: src_port_start }
+                network_policy_entries_policy_rule_src_ports_end_port: { get_param: src_port_end }
+            network_policy_entries_policy_rule_src_addresses:
+              - network_policy_entries_policy_rule_src_addresses_virtual_network: 
+                  list_join: [':', ["default-domain", {get_param: 'OS::project_id' }, { get_param: left_private_net_name }] ]
+
+              # - network_policy_entries_policy_rule_src_addresses_network_policy: 
+              # - network_policy_entries_policy_rule_src_addresses_security_group: 
+              # - network_policy_entries_policy_rule_src_addresses_subnet_list:
+              #     - network_policy_entries_policy_rule_src_addresses_subnet_list_ip_prefix:
+              #       network_policy_entries_policy_rule_src_addresses_subnet_list_ip_prefix_len:
+
+            ### Rule destination
+            network_policy_entries_policy_rule_dst_ports:
+              - network_policy_entries_policy_rule_dst_ports_start_port: { get_param: dst_port_start }
+                network_policy_entries_policy_rule_dst_ports_end_port: { get_param: dst_port_end }
+            network_policy_entries_policy_rule_dst_addresses:
+              - network_policy_entries_policy_rule_dst_addresses_virtual_network:
+                  list_join: [':', ["default-domain", {get_param: 'OS::project_id' }, { get_param: right_private_net_name }] ]
+              # - network_policy_entries_policy_rule_dst_addresses_network_policy:
+              # - network_policy_entries_policy_rule_dst_addresses_security_group:
+              # - network_policy_entries_policy_rule_dst_addresses_subnet_list:
+              #     - network_policy_entries_policy_rule_dst_addresses_subnet_list_ip_prefix: 
+              #       network_policy_entries_policy_rule_dst_addresses_subnet_list_ip_prefix_len:
+
+            ### Rule actions
+            network_policy_entries_policy_rule_action_list:
+              network_policy_entries_policy_rule_action_list_apply_service:
+                - list_join: [':', ["default-domain", {get_param: 'OS::project_id' }, { get_param: svm_name }] ]
+              network_policy_entries_policy_rule_action_list_simple_action: { get_param: simple_action } 
+              # network_policy_entries_policy_rule_action_list_alert: true
+              # network_policy_entries_policy_rule_action_list_assign_routing_instance: 
+              # network_policy_entries_policy_rule_action_list_gateway_name:
+              # network_policy_entries_policy_rule_action_list_log: true
+              # network_policy_entries_policy_rule_action_list_mirror_to:
+              #   network_policy_entries_policy_rule_action_list_mirror_to_analyzer_ip_address:
+              #   network_policy_entries_policy_rule_action_list_mirror_to_analyzer_mac_address:
+              #   network_policy_entries_policy_rule_action_list_mirror_to_analyzer_name:
+              #   network_policy_entries_policy_rule_action_list_mirror_to_encapsulation:
+              #   network_policy_entries_policy_rule_action_list_mirror_to_juniper_header: false
+              #   network_policy_entries_policy_rule_action_list_mirror_to_nh_mode: dynamic # [dynamic, static]
+              #   network_policy_entries_policy_rule_action_list_mirror_to_routing_instance:
+              #   network_policy_entries_policy_rule_action_list_mirror_to_static_nh_header:
+              #     network_policy_entries_policy_rule_action_list_mirror_to_static_nh_header_vni:
+              #     network_policy_entries_policy_rule_action_list_mirror_to_static_nh_header_vtep_dst_ip_address:
+              #       network_policy_entries_policy_rule_action_list_mirror_to_static_nh_header_vtep_dst_mac_address:
+              #   network_policy_entries_policy_rule_action_list_mirror_to_udp_port:
+              # network_policy_entries_policy_rule_action_list_qos_action:
