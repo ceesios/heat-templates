@@ -1,0 +1,426 @@
+# Heat template to Create 2 pfsense instances that sync the configuration.
+# Network design based on best practices in the pfsense book https://www.netgate.com/docs/pfsense/book/highavailability/example-redundant-configuration.html
+# Juniper Open Contrail is now called Tungstun Fabric.
+# Service chaining is explained on https://www.juniper.net/documentation/en_US/contrail3.2/topics/task/configuration/service-chaining-vnc.html
+#
+# Use as: openstack stack create -t pfsense_service_chaining.yml stackname
+# 
+# Author: Cees Moerkerken, http://virtu-on.nl/
+# Copyright (C) 2017 Cees Moerkerken (CloudVPS Heat templates)
+# 
+# This program is distributed in the hope that it will be useful, but 
+# WITHOUT ANY WARRANTY;
+
+heat_template_version: 2016-04-08
+
+description: A service chaining setup with pfsense.
+
+
+################
+## Parameters ##
+################
+
+parameters:
+  image:
+    type: string
+#    default: "Ubuntu 18.04 (LTS)"
+    default: "pfSense 2.4.3"
+    #default: "c9931a53-3bbb-44f3-b055-849e14716bcf"
+    description: "name or UUID of the pfSense image"
+  flavor:
+    type: string
+    default: "Standard 1GB"
+  public_net_name:
+    type: string
+    default: "net-public"
+    description: "This can be net-public, however then you won't be able to use a HA public IP"
+  private_net_name:
+    type: string
+    default: "net-private-pfsense"
+  private_net_prefix:
+    type: string
+    default: 192.168.1.0
+  private_net_prefix_len:
+    type: string
+    default: 24
+  private_net_cidr:
+    type: string
+    default: 192.168.1.0/24
+  private_net_gateway:
+    type: string
+    default: 192.168.1.1
+  private_net_vhid:
+    type: number
+    default: 2
+    description: "Range 1-9"
+    constraints:
+      - range: { min: 1, max: 9 }
+  private_net_os_dns:
+    type: string
+    description: "This is always the x.x.x.2 address provided by the openstack DNS server. The address is needed as a route for the metadata Server"
+    default: 192.168.1.2
+  private_net_lb1:
+    type: string
+    default: 192.168.1.3
+  private_net_lb2:
+    type: string
+    default: 192.168.1.4
+  private_net_pool_start:
+    type: string
+    default: 192.168.1.1
+  private_net_pool_end:
+    type: string
+    default: 192.168.1.254
+  private_net_dns_servers:
+    type: comma_delimited_list
+    default: "8.8.8.8,8.8.4.4"
+  sync_net_name:
+    type: string
+    default: net-sync-pfsense
+  sync_net_cidr:
+    type: string
+    default: 172.16.1.0/24
+  sync_net_lb1:
+    type: string
+    default: 172.16.1.3
+  sync_net_lb2:
+    type: string
+    default: 172.16.1.4
+  availability_zone1:
+    type: string
+    default: AMS-EQ1
+  availability_zone2:
+    type: string
+    default: AMS-EQ3
+  service_template_name:
+    type: string
+    default: pfsense_service_template
+
+resources:
+################
+## Networking ##
+################
+
+## ipam
+################################################################################################################################################################
+#  private_net_NetworkIpam:
+#    type: OS::ContrailV2::NetworkIpam
+#    properties:
+#      name:
+#        list_join: ['-', [ {get_param: 'OS::stack_name'}, {get_param: private_net_name}]]
+#      display_name:
+#        list_join: ['-', [ {get_param: 'OS::stack_name'}, {get_param: private_net_name}]]
+##      fq_name: 
+##      project:
+##      virtual_dns_refs:
+#      ipam_subnet_method: flat-subnet #[flat-subnet, auto-subnet, user-defined-subnet]
+### Ipam-Subnets Are Allowed Only With Flat-Subnet
+### With Flat-Subnet, Network Can Not Have User-Defined Subnet
+#      ipam_subnets:
+#        {
+#        ipam_subnets_subnets:
+#          [{
+#            ipam_subnets_subnets_addr_from_start: true ,
+#            ipam_subnets_subnets_alloc_unit: 1 ,
+#            ipam_subnets_subnets_allocation_pools:
+#              [{
+#                ipam_subnets_subnets_allocation_pools_end: { get_param: private_net_pool_end },
+#                ipam_subnets_subnets_allocation_pools_start: { get_param: private_net_pool_start }
+#              }],
+#            ipam_subnets_subnets_default_gateway: { get_param: private_net_gateway } ,
+#            ipam_subnets_subnets_dhcp_option_list:
+#              {
+#                ipam_subnets_subnets_dhcp_option_list_dhcp_option:
+#                  [{
+#                    ipam_subnets_subnets_dhcp_option_list_dhcp_option_dhcp_option_name: "42" ,
+#                    ipam_subnets_subnets_dhcp_option_list_dhcp_option_dhcp_option_value: "ntp.xs4all.nl"
+#                  }]
+#              } ,
+#            ipam_subnets_subnets_dns_nameservers: { get_param: private_net_dns_servers }, 
+#            ipam_subnets_subnets_enable_dhcp: true ,
+#            ipam_subnets_subnets_host_routes: 
+#              {
+#              ipam_subnets_subnets_host_routes_route:
+#                [{
+#                  ipam_subnets_subnets_host_routes_route_next_hop: { get_param: private_net_os_dns } ,
+#                  ipam_subnets_subnets_host_routes_route_next_hop_type: "ip-address" ,
+#                  ipam_subnets_subnets_host_routes_route_prefix: "169.254.169.254/32"
+#                }]
+#              },
+#            ipam_subnets_subnets_subnet: 
+#              {
+#              ipam_subnets_subnets_subnet_ip_prefix: {get_param: private_net_prefix},
+#              ipam_subnets_subnets_subnet_ip_prefix_len: {get_param: private_net_prefix_len}
+#              },
+#            ipam_subnets_subnets_subnet_name: { get_param: private_net_name } ,
+#          }]
+#        }
+
+##user-defined-subnet          
+#      network_ipam_mgmt:
+#        network_ipam_mgmt_cidr_block:
+#          {
+#            network_ipam_mgmt_cidr_block_ip_prefix: {get_param: private_net_prefix} ,
+#            network_ipam_mgmt_cidr_block_ip_prefix_len: {get_param: private_net_prefix_len}
+#          }
+#        network_ipam_mgmt_dhcp_option_list:
+#          {
+#            network_ipam_mgmt_dhcp_option_list_dhcp_option:
+#              [{
+#                network_ipam_mgmt_dhcp_option_list_dhcp_option_dhcp_option_name: "42" ,
+#                network_ipam_mgmt_dhcp_option_list_dhcp_option_dhcp_option_value: "ntp.xs4all.nl"
+#              }]
+#          }
+#        network_ipam_mgmt_host_routes: 
+#          {
+#          network_ipam_mgmt_host_routes_route:
+#            [{
+#              network_ipam_mgmt_host_routes_route_next_hop: { get_param: private_net_os_dns } ,
+#              network_ipam_mgmt_host_routes_route_next_hop_type: "ip-address" ,
+#              network_ipam_mgmt_host_routes_route_prefix: "169.254.169.254/32"
+#            }]
+#          }
+#        network_ipam_mgmt_ipam_dns_method: default-dns-server #[none, default-dns-server, tenant-dns-server, virtual-dns-server]
+#        network_ipam_mgmt_ipam_dns_server:
+#          {
+#            network_ipam_mgmt_ipam_dns_server_tenant_dns_server_address: 
+#              {
+#                network_ipam_mgmt_ipam_dns_server_tenant_dns_server_address_ip_address: { get_param: private_net_dns_servers }
+#              },
+#              network_ipam_mgmt_ipam_dns_server_virtual_dns_server_name: dns_nameservers
+#          }
+#        network_ipam_mgmt_ipam_method: dhcp #[dhcp, fixed]
+
+
+## Contrail virtual network
+################################################################################################################################################################
+
+#  private_net:
+#    type: OS::ContrailV2::VirtualNetwork
+#    depends_on: [ private_net_NetworkIpam ]
+#    properties:
+#      name: { get_param: private_net_name }
+#      network_ipam_refs: [{ get_resource: private_net_NetworkIpam }]
+#      network_ipam_refs_data:
+#        [{
+#          network_ipam_refs_data_ipam_subnets:
+#            [{
+#              network_ipam_refs_data_ipam_subnets_subnet:
+#                {
+#                  network_ipam_refs_data_ipam_subnets_subnet_ip_prefix: { get_param: private_net_prefix },
+#                  network_ipam_refs_data_ipam_subnets_subnet_ip_prefix_len: { get_param: private_net_prefix_len },
+#                },
+#            }]
+#         }]
+
+
+## Contrail basic subnet and network
+################################################################################################################################################################
+
+#  private_net_NetworkIpam:
+#    properties:
+#      name: {get_param: private_net_name}
+#    type: OS::ContrailV2::NetworkIpam
+#
+#  private_net:
+#    depends_on: [private_net_NetworkIpam]
+#    properties:
+#      name: {get_param: private_net_name}
+#      network_ipam_refs:
+#      - {get_resource: private_net_NetworkIpam}
+#      network_ipam_refs_data:
+#      - network_ipam_refs_data_ipam_subnets:
+#        - network_ipam_refs_data_ipam_subnets_subnet:
+#            network_ipam_refs_data_ipam_subnets_subnet_ip_prefix: {get_param: private_net_prefix}
+#            network_ipam_refs_data_ipam_subnets_subnet_ip_prefix_len: {get_param: private_net_prefix_len}
+#    type: OS::ContrailV2::VirtualNetwork
+
+## Neutron subnet and network
+################################################################################################################################################################
+
+  private_net:
+    type: OS::Neutron::Net
+    properties:
+      name: { get_param: private_net_name }
+#        list_join: ['-', [ {get_param: 'OS::stack_name'}, {get_param: private_net_name}]]
+
+  private_subnet:
+    type: OS::Neutron::Subnet
+    properties:
+      network_id: { get_resource: private_net }
+      cidr: { get_param: private_net_cidr }
+      dns_nameservers: { get_param: private_net_dns_servers }
+      enable_dhcp: True
+      host_routes: 
+        - nexthop: { get_param: private_net_os_dns }
+          destination: 169.254.169.254/32
+        - nexthop: { get_param: private_net_gateway }
+          destination: 0.0.0.0/0
+      gateway_ip: Null
+      allocation_pools:
+        - start: { get_param: private_net_pool_start }
+          end: { get_param: private_net_pool_end }
+
+  sync_net:
+    type: OS::Neutron::Net
+    properties:
+      name: {get_param: sync_net_name}
+#        list_join: ['-', [ {get_param: 'OS::stack_name'}, {get_param: sync_net_name}]]
+
+  sync_subnet:
+    type: OS::Neutron::Subnet
+    properties:
+      network_id: { get_resource: sync_net }
+      cidr: { get_param: sync_net_cidr }
+      enable_dhcp: True
+      gateway_ip: Null
+
+###############
+## Instances ##
+###############
+
+  template_ServiceTemplate:
+    type: OS::ContrailV2::ServiceTemplate
+    properties:
+      name:
+        list_join: ['-', [ {get_param: 'OS::stack_name'}, {get_param: service_template_name}]]
+      service_template_properties:
+        {
+#          service_template_properties_version: { get_param: service_template_properties_version },
+          service_template_properties_service_mode: in-network ,
+          service_template_properties_service_type: firewall ,
+          service_template_properties_service_virtualization_type: virtual-machine ,
+          service_template_properties_image_name: { get_param: image },
+          service_template_properties_flavor: { get_param: flavor },
+          service_template_properties_service_virtualization_type: virtual-machine ,
+          service_template_properties_ordered_interfaces: true ,
+          #service_template_properties_availability_zone_enable: { get_param: service_template_properties_availability_zone_enable },
+          #service_template_properties_service_scaling: { get_param: service_template_properties_service_scaling },
+          service_template_properties_interface_type:
+            [
+              {
+              service_template_properties_interface_type_service_interface_type: left ,
+              service_template_properties_interface_type_shared_ip: false,
+              service_template_properties_interface_type_static_route_enable: false,
+              },
+              {
+              service_template_properties_interface_type_service_interface_type: right ,
+              service_template_properties_interface_type_shared_ip: true,
+              service_template_properties_interface_type_static_route_enable: false,
+              },
+              {
+              service_template_properties_interface_type_service_interface_type: other1 ,
+              service_template_properties_interface_type_shared_ip: false,
+              service_template_properties_interface_type_static_route_enable: false,
+              }
+            ],
+        }
+      domain: default-domain
+
+
+
+  service_instance:
+    type: OS::ContrailV2::ServiceInstance
+    depends_on: [ template_ServiceTemplate, private_net]
+    properties:
+      name:
+        list_join: ['-', [ {get_param: 'OS::stack_name'}, 'pfsense01']]
+      service_template_refs: [{ get_resource:  template_ServiceTemplate}]
+      service_instance_properties:
+        {
+        service_instance_properties_ha_mode: active-standby ,
+        service_instance_properties_auto_policy: true ,
+        service_instance_properties_scale_out:
+          {
+          service_instance_properties_scale_out_auto_scale: true ,
+          service_instance_properties_scale_out_max_instances: 2
+          } ,
+#        service_instance_properties_availability_zone: { get_param: availability_zone1 }
+        service_instance_properties_interface_list:
+          [
+            {
+            service_instance_properties_interface_list_virtual_network:
+#default-domain:BXL000009 compute-Cees:net-private-pfsense
+             {
+               list_join: [':', ["default-domain", "BXL000009 compute-Cees", { get_param: private_net_name }] ]
+             },
+            service_instance_properties_interface_list_allowed_address_pairs:
+              {
+              service_instance_properties_interface_list_allowed_address_pairs_allowed_address_pair:
+                [
+                  {
+                  service_instance_properties_interface_list_allowed_address_pairs_allowed_address_pair_ip:
+                    {
+                    service_instance_properties_interface_list_allowed_address_pairs_allowed_address_pair_ip_ip_prefix: "192.168.1.0",
+                    service_instance_properties_interface_list_allowed_address_pairs_allowed_address_pair_ip_ip_prefix_len: 24 ,
+                    },
+                  service_instance_properties_interface_list_allowed_address_pairs_allowed_address_pair_address_mode: "active-standby",
+                  }
+                ],
+              },
+#              service_instance_properties_interface_list_static_routes:
+#                {
+#                  service_instance_properties_interface_list_static_routes_route:
+#                    [{
+#                      service_instance_properties_interface_list_static_routes_route_prefix: { get_param: service_instance_properties_interface_list_static_routes_route_prefix },
+#                      service_instance_properties_interface_list_static_routes_route_next_hop: { get_param: service_instance_properties_interface_list_static_routes_route_next_hop },
+#                      service_instance_properties_interface_list_static_routes_route_next_hop_type: { get_param: service_instance_properties_interface_list_static_routes_route_next_hop_type },
+#                      service_instance_properties_interface_list_static_routes_route_community_attributes:
+#                        {
+#                          service_instance_properties_interface_list_static_routes_route_community_attributes_community_attribute: [{ get_param: service_instance_properties_interface_list_static_routes_route_community_attributes_community_attribute }],
+#                        },
+#                    }],
+#                },
+            },
+            {
+            service_instance_properties_interface_list_virtual_network: "default-domain:admin:direct-attach" ,
+            },
+            {
+            service_instance_properties_interface_list_virtual_network:
+              {
+#                list_join: [':', { get_attr: [ sync_net, fq_name ] } ]
+                list_join: [':', ["default-domain", "BXL000009 compute-Cees", { get_param: sync_net_name }] ]
+              },
+            }
+          ]
+        }
+
+
+
+#  private_policy:
+#    type: OS::ContrailV2::NetworkPolicy
+#    depends_on: [ private_net, service_instance ]
+#    properties:
+#      name: { get_param: policy_name }
+#      network_policy_entries:
+#        network_policy_entries_policy_rule: [
+#              { 
+#                "direction": egres, 
+#                "protocol": "any", 
+#                "action_list": {"apply_service": [{get_resource: service_instance}]}, 
+#                "src_addresses": [{ "virtual_network": {get_resource: private_net}}] 
+#              }, 
+#        ]
+
+#  private_policy_attach_net1:
+#    type: OS::ContrailV2::AttachPolicy
+#    depends_on: [ private_net, private_policy ]
+#    properties:
+#      network: { get_resource: private_net }
+#      policy: { get_attr: [private_policy, fq_name] }
+
+
+#############
+## Outputs ##
+#############
+#
+#outputs:
+#  service_instance_fq_name:
+#    description: FQ name of the service template
+#    value: { get_attr: [ service_instance, fq_name] }
+#  service_instance_vms:
+#    description: List of service VMs
+#    value: { get_attr: [ service_instance, virtual_machines] }
+#  num_active_service_instance_vms:
+#    description: Number of active service VMs
+#    value: { get_attr: [ service_instance, active_service_vms] }
